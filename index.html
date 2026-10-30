@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>3D 拋物線追蹤與軌跡預測系統</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #000; color: #fff; min-height: 100vh; }
+    
+    /* 大屏控制中心樣式 */
+    #view-hub { padding: 20px; text-align: center; display: none; }
+    .hub-header { margin-bottom: 20px; }
+    .pin-badge { font-size: 2.5rem; font-weight: bold; color: #30d158; letter-spacing: 4px; margin: 10px 0; }
+    
+    .qr-container { display: flex; justify-content: center; gap: 30px; margin: 20px 0; flex-wrap: wrap; }
+    .qr-card { background: #1c1c1e; padding: 15px; border-radius: 12px; border: 1px solid #333; text-align: center; }
+    .qr-box { background: #fff; padding: 10px; border-radius: 8px; margin-top: 10px; display: inline-block; }
+    
+    .dash { display: flex; justify-content: center; gap: 20px; margin: 20px 0; flex-wrap: wrap; }
+    .dash-box { background: #1c1c1e; padding: 15px 25px; border-radius: 12px; border-left: 4px solid #0a84ff; text-align: left; min-width: 200px; }
+    .dash-title { font-size: 0.85rem; color: #aaa; margin-bottom: 5px; }
+    .dash-value { font-size: 1.25rem; font-weight: bold; color: #ff9f0a; }
+
+    #canvas3d { background: #1c1c1e; border-radius: 12px; width: 100%; max-width: 800px; height: auto; border: 1px solid #333; }
+
+    /* 手機鏡頭端樣式 */
+    #view-mobile { padding: 12px; text-align: center; display: none; }
+    #video-box { position: relative; width: 100%; max-width: 480px; margin: 0 auto; }
+    video, #overlay { width: 100%; height: auto; border-radius: 10px; }
+    #overlay { position: absolute; top: 0; left: 0; }
+    
+    .mobile-controls { background: #1c1c1e; padding: 15px; border-radius: 12px; margin-top: 12px; max-width: 480px; margin-left: auto; margin-right: auto; }
+    .status-tag { display: inline-block; padding: 6px 14px; border-radius: 20px; background: #ff9f0a; color: #000; font-weight: bold; font-size: 0.9rem; margin-bottom: 10px; }
+    .color-preview { width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; display: inline-block; vertical-align: middle; margin-left: 8px; }
+    button { width: 100%; padding: 12px; background: #34c759; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: bold; cursor: pointer; margin-top: 8px; }
+  </style>
+</head>
+<body>
+
+  <!-- 1. 電腦 / 筆電大屏接收端 View -->
+  <div id="view-hub">
+    <div class="hub-header">
+      <h2>🏀 3D 雙目立體追蹤與落點接收中心</h2>
+      <p style="color:#aaa; margin-top:5px;">請用兩台手機分別掃描下方 QR Code 進行鏡頭對接</p>
+      <div class="pin-badge" id="hub-pin">------</div>
+    </div>
+
+    <!-- 雙機 QR Code 配對區 -->
+    <div class="qr-container">
+      <div class="qr-card">
+        <h3>📱 手機 A (左側鏡頭)</h3>
+        <div id="qrcode-camA" class="qr-box"></div>
+      </div>
+      <div class="qr-card">
+        <h3>📱 手機 B (右側鏡頭)</h3>
+        <div id="qrcode-camB" class="qr-box"></div>
+      </div>
+    </div>
+
+    <!-- 數據分析儀表板 -->
+    <div class="dash">
+      <div class="dash-box">
+        <div class="dash-title">即時 3D 空間座標</div>
+        <div class="dash-value" id="pos-3d">(0.00, 0.00, 0.00) m</div>
+      </div>
+      <div class="dash-box" style="border-left-color: #ff3b30;">
+        <div class="dash-title">預測落地點 (X, Y)</div>
+        <div class="dash-value" id="target-land" style="color: #ff3b30;">X: --, Y: --</div>
+      </div>
+    </div>
+
+    <!-- 3D 軌跡可視化畫布 -->
+    <canvas id="canvas3d" width="800" height="450"></canvas>
+  </div>
+
+  <!-- 2. 手機鏡頭端 View -->
+  <div id="view-mobile">
+    <h3 id="mobile-title">🎥 手機鏡頭端</h3>
+    <div style="margin: 8px 0;">
+      <span class="status-tag" id="mobile-status">請點擊畫面上目標小球以鎖定顏色</span>
+    </div>
+
+    <div id="video-box">
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="mobile-controls">
+      <div style="font-size:0.9rem; color:#aaa; margin-bottom: 8px;">
+        已鎖定顏色：<span id="color-code">RGB(255,100,0)</span>
+        <span id="color-dot" class="color-preview" style="background: rgb(255,100,0);"></span>
+      </div>
+      <button id="start-btn" onclick="toggleTracking()">🚀 開始實時座標傳輸</button>
+    </div>
+  </div>
+
+  <!-- 邏輯腳本區 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getDatabase, ref, onValue, update } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBWa8b0rQl-qj-IWjP5hZntEi4ud_cOeVA",
+      authDomain: "screen-pusher.firebaseapp.com",
+      databaseURL: "https://screen-pusher-default-rtdb.asia-southeast1.firebasedatabase.app/",
+      projectId: "screen-pusher"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    // 解析 URL 參數判斷身份
+    const urlParams = new URLSearchParams(window.location.search);
+    const role = urlParams.get('role'); // 'camA', 'camB' 或 null (hub)
+    const pin = urlParams.get('pin') || Math.floor(100000 + Math.random() * 900000).toString();
+
+    // 路由開關
+    if (role === 'camA' || role === 'camB') {
+      document.getElementById('view-mobile').style.display = 'block';
+      initMobileMode(role, pin);
+    } else {
+      document.getElementById('view-hub').style.display = 'block';
+      initHubMode(pin);
+    }
+
+    // ==========================================
+    // 💻 1. 大屏控制中心邏輯 (Hub Mode)
+    // ==========================================
+    function initHubMode(pinCode) {
+      document.getElementById('hub-pin').innerText = pinCode;
+
+      // 動態生成帶有完整網址與參數的 QR Code
+      const baseUrl = `${window.location.origin}${window.location.pathname}`;
+      const urlCamA = `${baseUrl}?role=camA&pin=${pinCode}`;
+      const urlCamB = `${baseUrl}?role=camB&pin=${pinCode}`;
+
+      new QRCode(document.getElementById("qrcode-camA"), { text: urlCamA, width: 140, height: 140 });
+      new QRCode(document.getElementById("qrcode-camB"), { text: urlCamB, width: 140, height: 140 });
+
+      const canvas = document.getElementById('canvas3d');
+      const ctx = canvas.getContext('2d');
+
+      // 預設兩台手機相對原點位置 (單位: 公尺)
+      const CamA_Pos = { x: -1.0, y: 0.0, z: 1.5 };
+      const CamB_Pos = { x: 1.0,  y: 0.0, z: 1.5 };
+
+      let posA = null, posB = null;
+      let posHistory = [];
+
+      // 監聽來自手機 A/B 的座標點
+      onValue(ref(db, `screens/${pinCode}/tracker`), (snap) => {
+        const data = snap.val();
+        if (!data) return;
+
+        if (data.camA) posA = data.camA;
+        if (data.camB) posB = data.camB;
+
+        // 當兩台手機時間差 < 60ms 時進行 3D 計算
+        if (posA && posB && Math.abs(posA.t - posB.t) < 60) {
+          const point3D = calculateTriangulation(posA, posB, CamA_Pos, CamB_Pos);
+          posHistory.push(point3D);
+          if (posHistory.length > 30) posHistory.shift();
+
+          document.getElementById('pos-3d').innerText = `(${point3D.x.toFixed(2)}, ${point3D.y.toFixed(2)}, ${point3D.z.toFixed(2)}) m`;
+
+          if (posHistory.length >= 2) {
+            const landPoint = predictLanding(posHistory[posHistory.length - 2], point3D, (posA.t - posHistory[posHistory.length - 2].t) / 1000);
+            if (landPoint) {
+              document.getElementById('target-land').innerText = `X: ${landPoint.x.toFixed(2)}m, Y: ${landPoint.y.toFixed(2)}m`;
+            }
+          }
+
+          drawScene(ctx, canvas, posHistory, point3D);
+        }
+      });
+    }
+
+    function calculateTriangulation(pA, pB, CamA_Pos, CamB_Pos) {
+      const disparity = Math.abs(pA.x - pB.x) + 0.001;
+      const depthY = (2.0 * 0.8) / disparity;
+      const worldX = CamA_Pos.x + (pA.x - 0.5) * depthY;
+      const worldZ = CamA_Pos.z - (pA.y - 0.5) * depthY;
+      return { x: worldX, y: depthY, z: Math.max(0, worldZ), t: Date.now() };
+    }
+
+    function predictLanding(p0, p1, dt) {
+      if (dt <= 0) return null;
+      const vx = (p1.x - p0.x) / dt, vy = (p1.y - p0.y) / dt, vz = (p1.z - p0.z) / dt;
+      const zBasket = 0.4, g = 9.81;
+
+      const a = 0.5 * g, b = -vz, c = zBasket - p1.z;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return null;
+
+      const tLand = (-b + Math.sqrt(disc)) / (2 * a);
+      if (tLand <= 0) return null;
+
+      return { x: p1.x + vx * tLand, y: p1.y + vy * tLand };
+    }
+
+    function drawScene(ctx, canvas, history, current) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const scale = 100;
+      const originX = canvas.width / 2;
+      const originY = canvas.height - 50;
+
+      // 繪製軌跡
+      ctx.beginPath();
+      history.forEach((p, i) => {
+        const cx = originX + p.x * scale;
+        const cy = originY - p.y * scale;
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      });
+      ctx.strokeStyle = '#30d158'; ctx.lineWidth = 3; ctx.stroke();
+
+      // 當前點
+      const curX = originX + current.x * scale;
+      const curY = originY - current.y * scale;
+      ctx.fillStyle = '#0a84ff'; ctx.beginPath(); ctx.arc(curX, curY, 8, 0, Math.PI*2); ctx.fill();
+    }
+
+    // ==========================================
+    // 📱 2. 手機鏡頭端邏輯 (Mobile Mode)
+    // ==========================================
+    let isTracking = false;
+    let targetRGB = { r: 255, g: 100, b: 0 };
+
+    function initMobileMode(camRole, roomPin) {
+      document.getElementById('mobile-title').innerText = `🎥 手機 ${camRole === 'camA' ? 'A (左側)' : 'B (右側)'} 鏡頭`;
+
+      const video = document.getElementById('webcam');
+      const overlay = document.getElementById('overlay');
+      const ctx = overlay.getContext('2d');
+
+      // 啟動鏡頭
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
+      }).then(stream => {
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          overlay.width = video.videoWidth;
+          overlay.height = video.videoHeight;
+          requestAnimationFrame(() => processMobileFrame(video, overlay, ctx, camRole, roomPin));
+        };
+      }).catch(err => alert('無法取得相機權限: ' + err.message));
+
+      // 點擊取樣顏色
+      overlay.addEventListener('touchstart', (e) => handleColorPick(e.touches[0], overlay, video));
+      overlay.addEventListener('click', (e) => handleColorPick(e, overlay, video));
+    }
+
+    function handleColorPick(e, overlay, video) {
+      const rect = overlay.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * (overlay.width / rect.width));
+      const y = Math.floor((e.clientY - rect.top) * (overlay.height / rect.height));
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = overlay.width; tempCanvas.height = overlay.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(video, 0, 0);
+
+      const pixel = tempCtx.getImageData(x, y, 1, 1).data;
+      targetRGB = { r: pixel[0], g: pixel[1], b: pixel[2] };
+
+      document.getElementById('color-code').innerText = `RGB(${pixel[0]},${pixel[1]},${pixel[2]})`;
+      document.getElementById('color-dot').style.background = `rgb(${pixel[0]},${pixel[1]},${pixel[2]})`;
+    }
+
+    function processMobileFrame(video, overlay, ctx, role, pin) {
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
+        const imgData = ctx.getImageData(0, 0, overlay.width, overlay.height);
+        const data = imgData.data;
+
+        let sumX = 0, sumY = 0, count = 0;
+        const tolerance = 45;
+
+        for (let i = 0; i < data.length; i += 16) {
+          if (Math.abs(data[i] - targetRGB.r) < tolerance &&
+              Math.abs(data[i+1] - targetRGB.g) < tolerance &&
+              Math.abs(data[i+2] - targetRGB.b) < tolerance) {
+            const idx = i / 4;
+            sumX += idx % overlay.width;
+            sumY += Math.floor(idx / overlay.width);
+            count++;
+          }
+        }
+
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (count > 15) {
+          const cx = sumX / count;
+          const cy = sumY / count;
+
+          ctx.fillStyle = '#ff3b30';
+          ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.fill();
+
+          if (isTracking) {
+            update(ref(db, `screens/${pin}/tracker/${role}`), {
+              x: cx / overlay.width,
+              y: cy / overlay.height,
+              t: Date.now()
+            });
+          }
+        }
+      }
+      requestAnimationFrame(() => processMobileFrame(video, overlay, ctx, role, pin));
+    }
+
+    window.toggleTracking = function() {
+      isTracking = !isTracking;
+      const btn = document.getElementById('start-btn');
+      const tag = document.getElementById('mobile-status');
+      if (isTracking) {
+        btn.innerText = '⏸️ 暫停傳輸';
+        btn.style.background = '#ff3b30';
+        tag.innerText = '🚀 實時座標傳輸中';
+        tag.style.background = '#30d158';
+      } else {
+        btn.innerText = '🚀 開始實時座標傳輸';
+        btn.style.background = '#34c759';
+        tag.innerText = '已暫停傳輸';
+        tag.style.background = '#ff9f0a';
+      }
+    };
+  </script>
+</body>
+</html>

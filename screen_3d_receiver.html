@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>3D 雙目立體追蹤與落點接收中心</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #1c1c1e; color: #fff; margin: 0; padding: 20px; text-align: center; }
+    .dash { display: flex; justify-content: center; gap: 20px; margin: 15px 0; }
+    .box { background: #2c2c2e; padding: 15px 25px; border-radius: 10px; border-top: 4px solid #30d158; }
+    #canvas3d { background: #000; border-radius: 12px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+
+  <h2>🏀 雙機 3D 空間追蹤與拋物線落點預測</h2>
+  <p>大屏房間碼 (PIN)：<span id="pin-code" style="color:#0a84ff; font-weight:bold; font-size:1.5rem;">------</span></p>
+
+  <div class="dash">
+    <div class="box">即時 3D 座標：<br><span id="pos-3d" style="color:#ff9f0a; font-size:1.2rem;">(0.00, 0.00, 0.00) m</span></div>
+    <div class="box">預測落點 (X, Y)：<br><span id="target-land" style="color:#ff3b30; font-size:1.2rem;">X: --, Y: --</span></div>
+  </div>
+
+  <canvas id="canvas3d" width="700" height="450"></canvas>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBWa8b0rQl-qj-IWjP5hZntEi4ud_cOeVA",
+      authDomain: "screen-pusher.firebaseapp.com",
+      databaseURL: "https://screen-pusher-default-rtdb.asia-southeast1.firebasedatabase.app/",
+      projectId: "screen-pusher"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    document.getElementById('pin-code').innerText = pin;
+
+    const canvas = document.getElementById('canvas3d');
+    const ctx = canvas.getContext('2d');
+
+    // 🌟 相機姿態設定 (根據實際架設距離微調, 單位: 公尺)
+    const CamA_Pos = { x: -1.0, y: 0.0, z: 1.5 }; // 手機 A 位於左方 1m, 高度 1.5m
+    const CamB_Pos = { x: 1.0,  y: 0.0, z: 1.5 }; // 手機 B 位於右方 1m, 高度 1.5m
+
+    let posA = null, posB = null;
+    let posHistory = [];
+
+    // 監聽兩台手機傳回的 2D 點
+    onValue(ref(db, `screens/${pin}/tracker`), (snap) => {
+      const data = snap.val();
+      if (!data) return;
+
+      if (data.camA) posA = data.camA;
+      if (data.camB) posB = data.camB;
+
+      // 當兩台手機的時間差小於 50ms 時觸發 3D 三角重建
+      if (posA && posB && Math.abs(posA.t - posB.t) < 50) {
+        const point3D = calculateTriangulation(posA, posB);
+        posHistory.push(point3D);
+        if (posHistory.length > 30) posHistory.shift();
+
+        document.getElementById('pos-3d').innerText = `(${point3D.x.toFixed(2)}, ${point3D.y.toFixed(2)}, ${point3D.z.toFixed(2)}) m`;
+
+        if (posHistory.length >= 2) {
+          const landPoint = predictLanding(posHistory[posHistory.length - 2], point3D, (posA.t - posHistory[posHistory.length - 2].t) / 1000);
+          if (landPoint) {
+            document.getElementById('target-land').innerText = `X: ${landPoint.x.toFixed(2)}m, Y: ${landPoint.y.toFixed(2)}m`;
+          }
+        }
+
+        drawScene(point3D);
+      }
+    });
+
+    // 簡化型立體幾何視線三角測量 (Stereo Triangulation)
+    function calculateTriangulation(pA, pB) {
+      // 利用視差 (Disparity) 算出深度 Z
+      const disparity = Math.abs(pA.x - pB.x) + 0.001;
+      const depthY = (2.0 * 0.8) / disparity; // 根據基線與焦距推算深度
+
+      const worldX = CamA_Pos.x + (pA.x - 0.5) * depthY;
+      const worldZ = CamA_Pos.z - (pA.y - 0.5) * depthY;
+
+      return { x: worldX, y: depthY, z: Math.max(0, worldZ), t: Date.now() };
+    }
+
+    // 拋物線預測
+    function predictLanding(p0, p1, dt) {
+      if (dt <= 0) return null;
+      const vx = (p1.x - p0.x) / dt;
+      const vy = (p1.y - p0.y) / dt;
+      const vz = (p1.z - p0.z) / dt;
+
+      const zBasket = 0.4; // 籃框高度
+      const g = 9.81;
+
+      const a = 0.5 * g, b = -vz, c = zBasket - p1.z;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return null;
+
+      const tLand = (-b + Math.sqrt(disc)) / (2 * a);
+      if (tLand <= 0) return null;
+
+      return { x: p1.x + vx * tLand, y: p1.y + vy * tLand };
+    }
+
+    function drawScene(current) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const scale = 80;
+      const originX = canvas.width / 2;
+      const originY = canvas.height - 50;
+
+      // 繪製軌跡點
+      ctx.beginPath();
+      posHistory.forEach((p, i) => {
+        const cx = originX + p.x * scale;
+        const cy = originY - p.y * scale;
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      });
+      ctx.strokeStyle = '#30d158'; ctx.lineWidth = 3; ctx.stroke();
+
+      // 繪製當前小球位置
+      const curX = originX + current.x * scale;
+      const curY = originY - current.y * scale;
+      ctx.fillStyle = '#0a84ff'; ctx.beginPath(); ctx.arc(curX, curY, 8, 0, Math.PI*2); ctx.fill();
+    }
+  </script>
+</body>
+</html>

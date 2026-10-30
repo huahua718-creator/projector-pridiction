@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>極速色塊追蹤鏡頭端</title>
+  <style>
+    body { font-family: sans-serif; background: #000; color: #fff; margin: 0; padding: 10px; text-align: center; }
+    #video-box { position: relative; width: 100%; max-width: 480px; margin: 0 auto; }
+    video, canvas { width: 100%; height: auto; border-radius: 8px; }
+    canvas { position: absolute; top: 0; left: 0; }
+    .controls { background: #1c1c1e; padding: 12px; border-radius: 8px; margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+    input, select, button { padding: 10px; font-size: 1rem; border-radius: 6px; border: 1px solid #444; background: #2c2c2e; color: #fff; }
+    button { background: #34c759; font-weight: bold; border: none; }
+  </style>
+</head>
+<body>
+
+  <h3>🎥 3D 追蹤鏡頭端</h3>
+  
+  <div id="video-box">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="controls">
+    <label>大屏 PIN 碼：<input type="text" id="pin-input" placeholder="例如：839201"></label>
+    <label>相機角色：
+      <select id="cam-role">
+        <option value="camA">手機 A (左側鏡頭)</option>
+        <option value="camB">手機 B (右側鏡頭)</option>
+      </select>
+    </label>
+    <button onclick="startTracking()">🚀 開始連線與傳輸</button>
+    <p id="status" style="color: #ff9f0a; font-size: 0.85rem;">點擊畫面上的球以鎖定追蹤顏色</p>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getDatabase, ref, update, push } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBWa8b0rQl-qj-IWjP5hZntEi4ud_cOeVA",
+      authDomain: "screen-pusher.firebaseapp.com",
+      databaseURL: "https://screen-pusher-default-rtdb.asia-southeast1.firebasedatabase.app/",
+      projectId: "screen-pusher"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    const video = document.getElementById('webcam');
+    const overlay = document.getElementById('overlay');
+    const ctx = overlay.getContext('2d');
+
+    let targetRGB = { r: 255, g: 100, b: 0 }; // 預設螢幕橘色
+    let isTracking = false;
+
+    // 開啟 60 FPS 高幀率相機
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
+    }).then(stream => {
+      video.srcObject = stream;
+      video.onloadedmetadata = () => {
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
+        requestAnimationFrame(processFrame);
+      };
+    });
+
+    // 點擊鏡頭畫面取樣顏色
+    overlay.addEventListener('click', (e) => {
+      const rect = overlay.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * (overlay.width / rect.width));
+      const y = Math.floor((e.clientY - rect.top) * (overlay.height / rect.height));
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = overlay.width; tempCanvas.height = overlay.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(video, 0, 0);
+
+      const pixel = tempCtx.getImageData(x, y, 1, 1).data;
+      targetRGB = { r: pixel[0], g: pixel[1], b: pixel[2] };
+      document.getElementById('status').innerText = `已鎖定顏色：RGB(${pixel[0]}, ${pixel[1]}, ${pixel[2]})`;
+    });
+
+    function processFrame() {
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
+        const imgData = ctx.getImageData(0, 0, overlay.width, overlay.height);
+        const data = imgData.data;
+
+        let sumX = 0, sumY = 0, count = 0;
+        const tolerance = 45; // 顏色容許誤差
+
+        for (let i = 0; i < data.length; i += 16) { // 隔點採樣提升運算速度
+          const r = data[i], g = data[i+1], b = data[i+2];
+          if (Math.abs(r - targetRGB.r) < tolerance &&
+              Math.abs(g - targetRGB.g) < tolerance &&
+              Math.abs(b - targetRGB.b) < tolerance) {
+            const pixelIdx = i / 4;
+            sumX += pixelIdx % overlay.width;
+            sumY += Math.floor(pixelIdx / overlay.width);
+            count++;
+          }
+        }
+
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (count > 15) { // 成功抓取色塊質心
+          const cx = sumX / count;
+          const cy = sumY / count;
+
+          ctx.fillStyle = '#ff3b30';
+          ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.fill();
+
+          if (isTracking) {
+            const pin = document.getElementById('pin-input').value.trim();
+            const role = document.getElementById('cam-role').value;
+            if (pin) {
+              update(ref(db, `screens/${pin}/tracker/${role}`), {
+                x: cx / overlay.width,   // 正規化 0.0 ~ 1.0
+                y: cy / overlay.height,
+                t: Date.now()
+              });
+            }
+          }
+        }
+      }
+      requestAnimationFrame(processFrame);
+    }
+
+    window.startTracking = function() {
+      const pin = document.getElementById('pin-input').value.trim();
+      if (!pin) { alert('請輸入大屏 PIN 碼'); return; }
+      isTracking = true;
+      document.getElementById('status').innerText = '🚀 實時座標傳輸中...';
+    };
+  </script>
+</body>
+</html>
